@@ -6,6 +6,8 @@
       "escapementType": "瑞士杠杆式",
       "balanceFrequency": "18000vph",
       "targetDailyRateSeconds": 20,
+      "amplitudeFloor": 220,
+      "amplitudeCeiling": 320,
       "note": "怀表机芯，走时偏快",
       "createdAt": "2026-06-16T00:00:00.000Z"
     }
@@ -26,11 +28,19 @@
       "id": "retest_demo",
       "clockId": "clock_demo",
       "adjustmentId": "adjustment_demo",
+      "idempotencyKey": null,
       "testedAt": "2026-06-16T00:00:00.000Z",
+      "createdAt": "2026-06-16T00:00:00.000Z",
+      "seq": 1,
       "dailyRateSeconds": 31,
       "amplitude": 248,
+      "violations": [
+        "RATE_HIGH"
+      ],
       "qualified": false,
       "note": "仍偏快，振幅尚可"
     }
-  ]
+  ],
+  "alerts": [],
+  "alertHandlings": []
 }
