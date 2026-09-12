@@ -38,6 +38,17 @@ async function api(base, method, pathname, body, headers = {}) {
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }
 
+// 直接发送原始字符串，用于构造零字节空体、null 等非法请求体
+async function postRaw(base, pathname, raw) {
+  const res = await fetch(base + pathname, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: raw
+  });
+  const text = await res.text();
+  return { status: res.status, body: text ? JSON.parse(text) : null };
+}
+
 async function createClock(base, overrides = {}) {
   const res = await api(base, "POST", "/clocks", {
     code: `CLK-T-${dbCounter}-${Math.random().toString(36).slice(2, 6)}`,
@@ -318,6 +329,88 @@ test("非法输入返回 400 且不写库", async () => {
     // 所有失败请求都没有落复测
     const history = await api(srv.base, "GET", `/clocks/${clock.id}/history`);
     assert.equal(history.body.data.retests.length, 0);
+  } finally {
+    await srv.close();
+  }
+});
+
+test("三个写接口拒绝空请求体与 JSON null，且不新增任何记录", async () => {
+  const srv = await startServer();
+  try {
+    const clock = await createClock(srv.base);
+    // 造一条已处理告警，用于取处理接口路径
+    await retest(srv.base, clock.id, { dailyRateSeconds: 25, amplitude: 280, testedAt: "2026-08-01T08:00:00Z" });
+    await retest(srv.base, clock.id, { dailyRateSeconds: 26, amplitude: 280, testedAt: "2026-08-02T08:00:00Z" });
+    const alertId = (await api(srv.base, "GET", "/alerts")).body.data[0].id;
+
+    const before = await api(srv.base, "GET", "/clocks");
+    const beforeClocks = before.body.data.length;
+    const beforeHistory = await api(srv.base, "GET", `/clocks/${clock.id}/history`);
+    const beforeRetests = beforeHistory.body.data.retests.length;
+    const beforeAlerts = (await api(srv.base, "GET", "/alerts?status=all")).body.data.length;
+
+    // 1) POST /clocks：零字节空体 / null / 非对象
+    for (const raw of ["", "   ", "null", "[]", "42", "\"x\""]) {
+      const res = await postRaw(srv.base, "/clocks", raw);
+      assert.equal(res.status, 400, `POST /clocks 体=${JSON.stringify(raw)} 应 400`);
+      assert.match(res.body.error, /请求体|JSON 对象/);
+    }
+    // {} 属于缺少必填字段，同样 400 且不落库
+    const emptyObj = await api(srv.base, "POST", "/clocks", {});
+    assert.equal(emptyObj.status, 400);
+
+    // 2) POST /clocks/:id/retests：零字节空体 / null
+    for (const raw of ["", "null"]) {
+      const res = await postRaw(srv.base, `/clocks/${clock.id}/retests`, raw);
+      assert.equal(res.status, 400, `retests 体=${JSON.stringify(raw)} 应 400`);
+      assert.match(res.body.error, /请求体/);
+    }
+    // 不存在的钟表 + null 也必须 400（不能 404/500 之外的行为）
+    const nullOnGhost = await postRaw(srv.base, "/clocks/ghost/retests", "null");
+    assert.equal(nullOnGhost.status, 400);
+
+    // 3) POST /alerts/:id/handle：零字节空体 / null
+    for (const raw of ["", "null"]) {
+      const res = await postRaw(srv.base, `/alerts/${alertId}/handle`, raw);
+      assert.equal(res.status, 400, `handle 体=${JSON.stringify(raw)} 应 400`);
+      assert.match(res.body.error, /请求体/);
+    }
+
+    // 确认没有新增钟表、复测、告警，告警仍处于 pending
+    const after = await api(srv.base, "GET", "/clocks");
+    assert.equal(after.body.data.length, beforeClocks);
+    const afterHistory = await api(srv.base, "GET", `/clocks/${clock.id}/history`);
+    assert.equal(afterHistory.body.data.retests.length, beforeRetests);
+    assert.equal((await api(srv.base, "GET", "/alerts?status=all")).body.data.length, beforeAlerts);
+    const stillPending = await api(srv.base, "GET", `/alerts/${alertId}`);
+    assert.equal(stillPending.body.data.status, "pending");
+    assert.equal(stillPending.body.data.handling, null);
+
+    // 成功路径：同一告警可正常处理（说明 400 只针对非法请求体，没有误伤正常流程）
+    const ok = await api(srv.base, "POST", `/alerts/${alertId}/handle`, { handledBy: "王师傅" });
+    assert.equal(ok.status, 201);
+    const handled = await api(srv.base, "GET", `/alerts/${alertId}`);
+    assert.equal(handled.body.data.status, "handled");
+  } finally {
+    await srv.close();
+  }
+});
+
+test("空体拦截不误伤成功路径：建钟与复测正常 201", async () => {
+  const srv = await startServer();
+  try {
+    const clock = await createClock(srv.base, { targetDailyRateSeconds: 12 });
+    const ok = await retest(srv.base, clock.id, { dailyRateSeconds: 8, amplitude: 275, testedAt: "2026-08-09T08:00:00Z" });
+    assert.equal(ok.status, 201);
+    assert.equal(ok.body.data.qualified, true);
+
+    // 合法 JSON 对象（含空对象走告警处理）不应被 parseBody 拦
+    await retest(srv.base, clock.id, { dailyRateSeconds: 30, amplitude: 280, testedAt: "2026-08-10T08:00:00Z" });
+    const b = await retest(srv.base, clock.id, { dailyRateSeconds: 31, amplitude: 280, testedAt: "2026-08-11T08:00:00Z" });
+    assert.equal(b.body.alerts.length, 1);
+    const alertId = b.body.alerts[0].id;
+    const handleEmptyObj = await api(srv.base, "POST", `/alerts/${alertId}/handle`, {});
+    assert.equal(handleEmptyObj.status, 201);
   } finally {
     await srv.close();
   }

@@ -212,14 +212,19 @@ function createApp(dbFile) {
   async function parseBody(req) {
     let raw = "";
     for await (const chunk of req) raw += chunk;
-    if (!raw) return {};
-    try {
-      return JSON.parse(raw);
-    } catch {
-      const error = new Error("请求体必须是合法JSON");
-      error.status = 400;
-      throw error;
+    if (!raw.trim()) {
+      throw fail(400, "请求体不能为空，必须提交 JSON 对象");
     }
+    let body;
+    try {
+      body = JSON.parse(raw);
+    } catch {
+      throw fail(400, "请求体必须是合法 JSON");
+    }
+    if (body === null || typeof body !== "object" || Array.isArray(body)) {
+      throw fail(400, "请求体必须是 JSON 对象，不接受 null、数组或标量值");
+    }
+    return body;
   }
 
   function makeId(prefix) {

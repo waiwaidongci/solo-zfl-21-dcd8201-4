@@ -11,6 +11,10 @@ PORT=3021 node server.js
 
 也可用 `DB_FILE=/path/to/db.json` 指定数据文件（测试用）。
 
+所有写接口（`POST /clocks`、`POST /clocks/:id/retests`、`POST /alerts/:id/handle` 等）
+的请求体必须是非空 JSON 对象：零字节空体、字面 `null`、数组或标量值一律返回 `400`
+且不写库；空对象 `{}` 对有必填字段的接口按“缺少字段”返回 `400`。
+
 ## 测试
 
 ```bash
