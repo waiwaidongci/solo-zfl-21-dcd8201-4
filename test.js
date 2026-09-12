@@ -416,6 +416,93 @@ test("空体拦截不误伤成功路径：建钟与复测正常 201", async () =
   }
 });
 
+test("调校接口：三字段为 null、空值、非法类型均拒绝且不写调校记录", async () => {
+  const srv = await startServer();
+  try {
+    const clock = await createClock(srv.base);
+    const count = () =>
+      api(srv.base, "GET", `/adjustments?clockId=${clock.id}`).then((res) => res.body.data.length);
+    const before = await count();
+
+    const base = { currentDailyRateSeconds: 68, direction: "慢针方向", amount: "向慢侧微调0.4格" };
+    const invalidBodies = [
+      // direction：缺失 / null / 空白串 / 数字 / 布尔 / 数组 / 对象
+      { patch: { direction: undefined }, field: /direction|缺少字段/ },
+      { patch: { direction: null }, field: /direction/ },
+      { patch: { direction: "" }, field: /direction/ },
+      { patch: { direction: "   " }, field: /direction/ },
+      { patch: { direction: 123 }, field: /direction/ },
+      { patch: { direction: true }, field: /direction/ },
+      { patch: { direction: ["慢针方向"] }, field: /direction/ },
+      { patch: { direction: { x: 1 } }, field: /direction/ },
+      // amount：缺失 / null / 空白串 / 数字 / 布尔
+      { patch: { amount: undefined }, field: /amount|缺少字段/ },
+      { patch: { amount: null }, field: /amount/ },
+      { patch: { amount: "" }, field: /amount/ },
+      { patch: { amount: "\t\n" }, field: /amount/ },
+      { patch: { amount: 42 }, field: /amount/ },
+      { patch: { amount: false }, field: /amount/ },
+      // currentDailyRateSeconds（走时误差）：缺失 / null / 空串 / 非数字文本 / 布尔 / 对象
+      { patch: { currentDailyRateSeconds: undefined }, field: /currentDailyRateSeconds|缺少字段/ },
+      { patch: { currentDailyRateSeconds: null }, field: /currentDailyRateSeconds/ },
+      { patch: { currentDailyRateSeconds: "" }, field: /currentDailyRateSeconds|缺少字段/ },
+      { patch: { currentDailyRateSeconds: "很快" }, field: /currentDailyRateSeconds/ },
+      { patch: { currentDailyRateSeconds: true }, field: /currentDailyRateSeconds/ },
+      { patch: { currentDailyRateSeconds: {} }, field: /currentDailyRateSeconds/ },
+      // note 给了就必须是字符串
+      { patch: { note: 123 }, field: /note/ }
+    ];
+
+    for (const { patch, field } of invalidBodies) {
+      const body = { ...base, ...patch };
+      const res = await api(srv.base, "POST", `/clocks/${clock.id}/adjustments`, body);
+      assert.equal(res.status, 400, `非法调校 ${JSON.stringify(patch)} 应 400，实际：${JSON.stringify(res.body)}`);
+      assert.match(res.body.error, field);
+      assert.equal(await count(), before, `非法调校 ${JSON.stringify(patch)} 不得写入记录`);
+    }
+
+    // 空体 / null 同样 400 且不落库
+    for (const raw of ["", "null"]) {
+      const res = await postRaw(srv.base, `/clocks/${clock.id}/adjustments`, raw);
+      assert.equal(res.status, 400);
+      assert.equal(await count(), before);
+    }
+
+    // 不存在的钟表：合法请求体也 404，不产生游离调校记录
+    const globalBefore = (await api(srv.base, "GET", "/adjustments")).body.data.length;
+    const ghost = await api(srv.base, "POST", "/clocks/ghost/adjustments", base);
+    assert.equal(ghost.status, 404);
+    assert.equal((await api(srv.base, "GET", "/adjustments")).body.data.length, globalBefore);
+
+    // 成功路径：数字字符串可转数值；字符串字段自动去首尾空白
+    const ok = await api(srv.base, "POST", `/clocks/${clock.id}/adjustments`, {
+      currentDailyRateSeconds: "68.5",
+      direction: "  慢针方向  ",
+      amount: "游丝快慢针向慢侧微调0.4格",
+      note: "  初次调校，先保守处理 "
+    });
+    assert.equal(ok.status, 201, JSON.stringify(ok.body));
+    assert.equal(ok.body.data.currentDailyRateSeconds, 68.5);
+    assert.equal(ok.body.data.direction, "慢针方向");
+    assert.equal(ok.body.data.amount, "游丝快慢针向慢侧微调0.4格");
+    assert.equal(ok.body.data.note, "初次调校，先保守处理");
+    assert.equal(ok.body.data.clockId, clock.id);
+    assert.equal(await count(), before + 1);
+
+    // 负走时误差（偏慢）也是合法数字
+    const negative = await api(srv.base, "POST", `/clocks/${clock.id}/adjustments`, {
+      currentDailyRateSeconds: -12,
+      direction: "快针方向",
+      amount: "向快侧回调0.2格"
+    });
+    assert.equal(negative.status, 201);
+    assert.equal(negative.body.data.currentDailyRateSeconds, -12);
+    assert.equal(await count(), before + 2);
+  } finally {
+    await srv.close();
+  }
+});
+
 test("PUT 阈值后按新阈值验收", async () => {
   const srv = await startServer();
   try {

@@ -90,6 +90,13 @@ function finiteNumber(value) {
   return Number.isFinite(n) ? n : null;
 }
 
+// 仅接受非空（去空白后）字符串；null、数字、布尔、对象、数组一律拒绝
+function nonEmptyString(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
 function validateThresholds(input) {
   const target = finiteNumber(input.targetDailyRateSeconds);
   const floor = finiteNumber(input.amplitudeFloor);
@@ -461,18 +468,24 @@ function createApp(dbFile) {
     if (adjustmentMatch && req.method === "POST") {
       const clockId = adjustmentMatch[1];
       const body = await parseBody(req);
+      // 全部字段校验在写事务之外完成，任何非法输入都不会落库
       required(body, ["currentDailyRateSeconds", "direction", "amount"]);
       const currentDailyRateSeconds = finiteNumber(body.currentDailyRateSeconds);
       if (currentDailyRateSeconds === null) throw fail(400, "currentDailyRateSeconds 必须是数字");
+      const direction = nonEmptyString(body.direction);
+      if (direction === null) throw fail(400, "direction 必须是非空字符串");
+      const amount = nonEmptyString(body.amount);
+      if (amount === null) throw fail(400, "amount 必须是非空字符串");
+      if (body.note !== undefined && typeof body.note !== "string") throw fail(400, "note 必须是字符串");
       const result = await store.mutate((db) => {
         findClock(db, clockId);
         const adjustment = {
           id: makeId("adjustment"),
           clockId,
           currentDailyRateSeconds,
-          direction: body.direction,
-          amount: body.amount,
-          note: body.note || "",
+          direction,
+          amount,
+          note: typeof body.note === "string" ? body.note.trim() : "",
           createdAt: new Date().toISOString()
         };
         db.adjustments.push(adjustment);
